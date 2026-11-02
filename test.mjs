@@ -15,6 +15,8 @@ function makeEnv(sessionID) {
   const eventQueue = []
   let eventWake = null
   let gate = null
+  let rpcHandlers = {}
+  const rpcEvents = []
 
   const ctx = {
     storage: {
@@ -69,6 +71,19 @@ function makeEnv(sessionID) {
       async transform(callback) {
         callback({ add: (command) => commands.set(command.name, command) })
         return { dispose: async () => {} }
+      },
+    },
+    rpc: {
+      async register(_definition, handlers) {
+        rpcHandlers = handlers
+        return {
+          dispose: async () => {},
+          events: {
+            async emit(name, data) {
+              rpcEvents.push({ name, data })
+            },
+          },
+        }
       },
     },
     event: {
@@ -146,6 +161,16 @@ function makeEnv(sessionID) {
         return { ok: false, error: String(error.message) }
       }
     },
+    async rpc(name, input) {
+      try {
+        const handler = rpcHandlers[name]
+        if (handler === undefined) throw new Error(`no rpc handler: ${name}`)
+        return { ok: true, value: await handler(input, {}) }
+      } catch (error) {
+        return { ok: false, error: String(error.message) }
+      }
+    },
+    rpcEvents,
     get goal() {
       return storage.get("session:" + sessionID)
     },
@@ -745,6 +770,39 @@ test("a human steer after compaction grants edit and pause", async () => {
   })
   assert.equal(paused.ok, true)
   assert.equal(paused.value.goal.phase, "paused")
+})
+
+test("rpc get/pause/resume/clear drives the TUI sidebar", async () => {
+  const env = await fresh("ses_t40")
+  human(env)
+  assert.deepEqual((await env.rpc("get", { sessionID: env.sessionID })).value, null)
+
+  const created = await env.tool("create_goal", { objective: "one" })
+  assert.equal(created.ok, true)
+  const got = await env.rpc("get", { sessionID: env.sessionID })
+  assert.equal(got.ok, true)
+  assert.equal(got.value.objective, "one")
+  assert.equal(got.value.activation, "armed")
+  assert.ok(
+    env.rpcEvents.some((event) => event.name === "changed" && event.data.goal?.objective === "one"),
+  )
+
+  const paused = await env.rpc("pause", { sessionID: env.sessionID })
+  assert.equal(paused.ok, true)
+  assert.equal(paused.value.phase, "paused")
+  assert.equal(paused.value.activation, "disarmed")
+  assert.ok(env.rpcEvents.some((event) => event.name === "changed" && event.data.goal?.phase === "paused"))
+
+  const resumed = await env.rpc("resume", { sessionID: env.sessionID })
+  assert.equal(resumed.ok, true)
+  assert.equal(resumed.value.phase, "active")
+  assert.equal(env.synthetic.length, 1)
+
+  const cleared = await env.rpc("clear", { sessionID: env.sessionID })
+  assert.equal(cleared.ok, true)
+  assert.equal(cleared.value, null)
+  assert.equal(env.goal, undefined)
+  assert.ok(env.rpcEvents.some((event) => event.name === "changed" && event.data.goal === null))
 })
 
 // --- run --------------------------------------------------------------------
