@@ -1,7 +1,10 @@
 // Semantic tests for goal-lite. Runs without a model or an OpenCode server.
 //   node test.mjs
 import assert from "node:assert/strict"
-import plugin from "./index.ts"
+import { mkdir, rm, stat, writeFile } from "node:fs/promises"
+import { hostname } from "node:os"
+import { dirname } from "node:path"
+import plugin, { acquireGoalLock, goalLockPath } from "./index.ts"
 
 function makeEnv(sessionID) {
   const storage = new Map()
@@ -886,6 +889,61 @@ test("a deferred command waits for background shells, subagents, and images", as
     await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
     assert.equal(env.synthetic.length, 1, `${item.name}: the idle driver must start after completion`)
     assert.equal(env.goal.roundsStarted, 1)
+  }
+})
+
+// --- cross-process storage safety -------------------------------------------
+
+test("a goal mutation waits for the cross-process lock", async () => {
+  const env = await fresh("ses_t43_lock")
+  const hold = await acquireGoalLock(env.sessionID, 1_000)
+  let settled = false
+  const pending = env.command("locked objective").finally(() => {
+    settled = true
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(settled, false)
+  await hold()
+  await pending
+  assert.equal(settled, true)
+  assert.equal(env.goal.objective, "locked objective")
+})
+
+test("the goal mutation lock serializes two owners", async () => {
+  const sessionID = "ses_t44_lock"
+  const first = await acquireGoalLock(sessionID, 1_000)
+  let secondAcquired = false
+  const second = acquireGoalLock(sessionID, 1_000).then((release) => {
+    secondAcquired = true
+    return release
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(secondAcquired, false)
+  await first()
+  const release = await second
+  assert.equal(secondAcquired, true)
+  await release()
+})
+
+test("the goal mutation lock reclaims a dead owner", async () => {
+  const sessionID = "ses_t45_lock"
+  const path = goalLockPath(sessionID)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(
+    path,
+    JSON.stringify({
+      token: "dead-owner",
+      pid: 2_147_483_647,
+      host: hostname(),
+      createdAt: Date.now() - 1_000,
+    }),
+  )
+  try {
+    const release = await acquireGoalLock(sessionID, 1_000)
+    await release()
+    await assert.rejects(stat(path))
+  } finally {
+    await rm(path, { force: true })
   }
 })
 
