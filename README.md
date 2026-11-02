@@ -74,10 +74,11 @@ Restart OpenCode completely after changing the config.
 
 The TUI part adds a compact goal block at the top of the right sidebar (`sidebar.content`):
 
-- phase, rounds, and a progress bar;
+- phase, `rounds/max` continuation budget, and a progress bar (this is not a completion percentage);
 - the objective;
 - an `armed`/`disarmed` warning after a server restart;
-- the blocker message when the goal is blocked.
+- the blocker message when the goal is blocked;
+- for a complete goal, `✓ Completed in N rounds` instead of the budget bar.
 
 Click the block, run `/gl-view` (alias `/gls`), or press `Ctrl+Shift+G` to open a floating goal dialog. The dialog shows the full objective, phase, rounds, activation, and blocker, with clickable `[pause]`, `[resume]`, and `[clear]` actions. The dialog host does not route plugin keymap layers, so keyboard users should close it and use `/gl pause`, `/gl resume`, or `/gl clear` from the prompt.
 

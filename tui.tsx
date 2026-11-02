@@ -28,6 +28,16 @@ function progressBar(rounds: number, max: number): string {
   return `${"█".repeat(filled)}${"░".repeat(width - filled)} ${rounds}/${max}`
 }
 
+/** `rounds/max` is a continuation-round budget, not a completion percentage. */
+function statusLabel(goal: GoalPublic): string {
+  if (goal.phase === "complete") return "complete"
+  return `${phaseLabel(goal)} · ${goal.roundsStarted}/${goal.maxGoalRounds}`
+}
+
+function completionLabel(goal: GoalPublic): string {
+  return goal.roundsStarted === 1 ? "Completed in 1 round" : `Completed in ${goal.roundsStarted} rounds`
+}
+
 function createGoal(context: Plugin.Context, sessionID: () => string | undefined) {
   const [goal, setGoal] = createSignal<GoalPublic>()
   const rpc = context.client.rpc(GoalLite)
@@ -114,11 +124,22 @@ function GoalDialog(props: { context: Plugin.Context; sessionID: string }) {
           </text>
           <box flexDirection="column" gap={0}>
             <text fg={goalColor(theme, current())} wrapMode="none">
-              {phaseLabel(current())} · {current().roundsStarted}/{current().maxGoalRounds} · {current().activation}
+              {current().phase === "complete"
+                ? phaseLabel(current())
+                : `${phaseLabel(current())} · ${current().roundsStarted}/${current().maxGoalRounds} · ${current().activation}`}
             </text>
-            <text fg={theme.text.muted} wrapMode="none">
-              {progressBar(current().roundsStarted, current().maxGoalRounds)}
-            </text>
+            <Show
+              when={current().phase !== "complete"}
+              fallback={
+                <text fg={theme.text.feedback.success.base} wrapMode="none">
+                  ✓ {completionLabel(current())}
+                </text>
+              }
+            >
+              <text fg={theme.text.muted} wrapMode="none">
+                Rounds {progressBar(current().roundsStarted, current().maxGoalRounds)}
+              </text>
+            </Show>
             <Show when={current().blockedReason}>
               {(reason) => (
                 <text fg={theme.text.feedback.error.base} wrapMode="word">
@@ -168,15 +189,24 @@ function SidebarGoal(props: { context: Plugin.Context; sessionID: string }) {
               <b>Goal</b>
             </text>
             <text fg={theme.text.muted} wrapMode="none">
-              {phaseLabel(current())} · {current().roundsStarted}/{current().maxGoalRounds}
+              {statusLabel(current())}
             </text>
           </box>
           <text fg={theme.text.base} wrapMode="word">
             {current().objective}
           </text>
-          <text fg={theme.text.muted} wrapMode="none">
-            {progressBar(current().roundsStarted, current().maxGoalRounds)}
-          </text>
+          <Show
+            when={current().phase !== "complete"}
+            fallback={
+              <text fg={theme.text.feedback.success.base} wrapMode="none">
+                ✓ {completionLabel(current())}
+              </text>
+            }
+          >
+            <text fg={theme.text.muted} wrapMode="none">
+              Rounds {progressBar(current().roundsStarted, current().maxGoalRounds)}
+            </text>
+          </Show>
           <Show when={current().phase === "active" && current().activation === "disarmed"}>
             <text fg={theme.text.feedback.warning.base} wrapMode="word">
               disarmed · /gl resume
