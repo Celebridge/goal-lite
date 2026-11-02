@@ -644,6 +644,29 @@ async function startRound(
   return { started: true, goal: reserved }
 }
 
+/** Tool calls that can outlive the execution which started them. */
+const BACKGROUND_TOOL_NAMES: ReadonlySet<string> = new Set(["image", "shell", "subagent"])
+
+function isRunningBackgroundMessage(message: any): boolean {
+  if (message?.type === "shell") return message.status === "running"
+  if (message?.type !== "assistant" || !Array.isArray(message.content)) return false
+  return message.content.some(
+    (part: any) =>
+      part?.type === "tool" &&
+      part?.state?.status === "running" &&
+      BACKGROUND_TOOL_NAMES.has(part.name),
+  )
+}
+
+/**
+ * The executed turn has settled, but the session context can still show a
+ * background shell or subagent/image call that the idle hook must wait for.
+ */
+async function hasRunningBackground(ctx: any, sessionID: string): Promise<boolean> {
+  const messages = await ctx.session.context({ sessionID })
+  return messages.some(isRunningBackgroundMessage)
+}
+
 /** DSH driver: only an active, armed goal that is not waiting on background work. */
 async function drive(ctx: any, sessionID: string, background: readonly any[]): Promise<boolean> {
   const goal = await readGoal(ctx, sessionID)
@@ -1059,14 +1082,27 @@ const GoalLitePlugin = {
             if (event.type === "session.execution.succeeded") {
               busy.delete(sessionID)
               activeRounds.delete(sessionID)
-              if (!pendingStart.delete(sessionID)) continue
+              if (!pendingStart.has(sessionID)) continue
               // A command created/resumed/edited the goal after the idle hook
-              // already returned: start the deferred round now.
+              // already returned: start the deferred round now, unless the
+              // context still shows background work that the idle hook defers.
               await serialize(sessionID, async () => {
                 const session = await ctx.session.get({ sessionID })
-                if (session?.parentID !== undefined) return
                 const goal = await readGoal(ctx, sessionID)
-                if (goal === undefined || goal.phase !== "active" || !armed.has(sessionID)) return
+                if (
+                  session?.parentID !== undefined ||
+                  goal === undefined ||
+                  goal.phase !== "active" ||
+                  !armed.has(sessionID)
+                ) {
+                  pendingStart.delete(sessionID)
+                  return
+                }
+                if (await hasRunningBackground(ctx, sessionID)) return
+                // A successor execution may have started while this handler
+                // waited for the mutation queue; its settle event retries.
+                if (busy.has(sessionID)) return
+                pendingStart.delete(sessionID)
                 busy.add(sessionID)
                 try {
                   const result = await startRound(ctx, sessionID, goal)

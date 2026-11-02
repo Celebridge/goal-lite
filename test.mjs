@@ -836,6 +836,59 @@ test("a superseded execution keeps a command round deferred during the handoff",
   assert.equal(env.goal.roundsStarted, 1)
 })
 
+test("a deferred command waits for background shells, subagents, and images", async () => {
+  const background = [
+    {
+      name: "shell",
+      message: { type: "shell", shellID: "sh_1", command: "sleep 1", status: "running" },
+      complete() {
+        this.message.status = "exited"
+      },
+    },
+    {
+      name: "subagent",
+      message: {
+        type: "assistant",
+        content: [
+          { type: "tool", id: "tool_1", name: "subagent", state: { status: "running" } },
+        ],
+      },
+      complete() {
+        this.message.content[0].state = { status: "completed" }
+      },
+    },
+    {
+      name: "image",
+      message: {
+        type: "assistant",
+        content: [{ type: "tool", id: "tool_2", name: "image", state: { status: "running" } }],
+      },
+      complete() {
+        this.message.content[0].state = { status: "completed" }
+      },
+    },
+  ]
+
+  for (const [index, item] of background.entries()) {
+    const env = await fresh(`ses_t42_${index}`)
+    human(env)
+    env.emit({ type: "session.execution.started", data: { sessionID: env.sessionID } })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await env.command("new objective")
+    assert.equal(env.synthetic.length, 0, `${item.name}: the command must defer first`)
+
+    env.messages.push(item.message)
+    env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(env.synthetic.length, 0, `${item.name}: the settle fallback must not inject a round`)
+
+    item.complete()
+    await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
+    assert.equal(env.synthetic.length, 1, `${item.name}: the idle driver must start after completion`)
+    assert.equal(env.goal.roundsStarted, 1)
+  }
+})
+
 // --- run --------------------------------------------------------------------
 
 let failed = 0
