@@ -50,6 +50,7 @@ In `~/.config/opencode/opencode.json`:
 ```
 
 - `-opencode.goal` removes OpenCode's built-in `/goal` command and its idle loop. Without it two goal systems would run.
+- `@openviking/opencode-plugin` is only needed when that plugin is installed. If OpenViking is configured as an MCP server instead (the current macOS setup), use `"plugins": ["-opencode.goal"]`.
 - `experimental.todo` enables the built-in `todowrite`.
 - The local plugin directory loads automatically; it does not need an entry in `plugins`.
 - No `package.json` and no npm dependencies: the plugin exports a plain `{ id, setup }` object.

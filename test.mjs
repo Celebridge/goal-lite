@@ -159,7 +159,7 @@ async function fresh(id) {
 }
 
 function human(env) {
-  env.turn({ type: "user", text: "please do the thing" })
+  env.turn({ type: "user", text: "please do the thing", time: { created: Date.now() } })
 }
 
 function goalRound(env) {
@@ -587,7 +587,7 @@ test("a pause that races an idle round cannot be overwritten", async () => {
 
 test("edit during an auto round requires a direct human", async () => {
   const env = await fresh("ses_t29")
-  env.turn({ type: "idle" }, { type: "user", text: "start" })
+  env.turn({ type: "idle" }, { type: "user", text: "start", time: { created: Date.now() } })
   const created = await env.tool("create_goal", { objective: "one" })
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
   const result = await env.tool("update_goal", {
@@ -602,7 +602,7 @@ test("edit during an auto round requires a direct human", async () => {
 
 test("complete inside a real auto round works", async () => {
   const env = await fresh("ses_t30")
-  env.turn({ type: "idle" }, { type: "user", text: "start" })
+  env.turn({ type: "idle" }, { type: "user", text: "start", time: { created: Date.now() } })
   const created = await env.tool("create_goal", { objective: "one" })
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
   const result = await env.tool("update_goal", {
@@ -616,7 +616,7 @@ test("complete inside a real auto round works", async () => {
 
 test("complete still works after a compaction removes the round message", async () => {
   const env = await fresh("ses_t31")
-  env.turn({ type: "idle" }, { type: "user", text: "start" })
+  env.turn({ type: "idle" }, { type: "user", text: "start", time: { created: Date.now() } })
   const created = await env.tool("create_goal", { objective: "one" })
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
   env.turn({ type: "compaction", status: "completed", summary: "..." }, { type: "assistant", content: [] })
@@ -630,10 +630,10 @@ test("complete still works after a compaction removes the round message", async 
 
 test("a human steer after the round grants direct human authority", async () => {
   const env = await fresh("ses_t32")
-  env.turn({ type: "idle" }, { type: "user", text: "start" })
+  env.turn({ type: "idle" }, { type: "user", text: "start", time: { created: Date.now() } })
   const created = await env.tool("create_goal", { objective: "one" })
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
-  env.messages.push({ type: "user", text: "change the objective" })
+  env.messages.push({ type: "user", text: "change the objective", time: { created: Date.now() + 1_000 } })
   const result = await env.tool("update_goal", {
     goal_id: created.value.goal.id,
     revision: 1,
@@ -716,6 +716,35 @@ test("guidance is not injected for a complete goal", async () => {
   const after = { sessionID: env.sessionID, system: [] }
   await env.hooks["context"](after)
   assert.equal(after.system.length, 0)
+})
+
+test("a human steer after compaction grants edit and pause", async () => {
+  const env = await fresh("ses_t39")
+  const t0 = Date.now()
+  env.turn({ type: "idle" }, { type: "user", text: "start", time: { created: t0 } })
+  const created = await env.tool("create_goal", { objective: "one" })
+  await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
+  const steerAt = Date.now() + 1_000
+  env.turn(
+    { type: "compaction", status: "completed", summary: "..." },
+    { type: "assistant", content: [], time: { created: t0 + 10 } },
+    { type: "user", text: "change the objective", time: { created: steerAt } },
+  )
+  const edited = await env.tool("update_goal", {
+    goal_id: created.value.goal.id,
+    revision: 1,
+    action: "edit",
+    objective: "two",
+  })
+  assert.equal(edited.ok, true)
+  assert.equal(edited.value.goal.objective, "two")
+  const paused = await env.tool("update_goal", {
+    goal_id: created.value.goal.id,
+    revision: 2,
+    action: "pause",
+  })
+  assert.equal(paused.ok, true)
+  assert.equal(paused.value.goal.phase, "paused")
 })
 
 // --- run --------------------------------------------------------------------
