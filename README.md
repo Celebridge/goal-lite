@@ -72,7 +72,7 @@ Restart OpenCode completely after changing the config.
 
 ## TUI sidebar and floating dialog
 
-The TUI part adds a compact goal block to the right sidebar (`sidebar.content`):
+The TUI part adds a compact goal block at the top of the right sidebar (`sidebar.content`):
 
 - phase, rounds, and a progress bar;
 - the objective;

@@ -199,7 +199,8 @@ export default Plugin.define({
   id: "goal-lite.tui",
   setup(context) {
     context.ui.slot({
-      append: "sidebar.content",
+      // Keep the goal above the long MCP/context sections in the right sidebar.
+      prepend: "sidebar.content",
       render: (props) => <SidebarGoal context={context} sessionID={props.sessionID} />,
     })
 
