@@ -79,7 +79,7 @@ The TUI part adds a compact goal block to the right sidebar (`sidebar.content`):
 - an `armed`/`disarmed` warning after a server restart;
 - the blocker message when the goal is blocked.
 
-Click the block, run `/gl-view` (alias `/gls`), or press `Ctrl+Shift+G` to open a floating goal dialog. The dialog shows the full objective, phase, rounds, activation, and blocker, with `p` pause, `r` resume, and `x` clear actions.
+Click the block, run `/gl-view` (alias `/gls`), or press `Ctrl+Shift+G` to open a floating goal dialog. The dialog shows the full objective, phase, rounds, activation, and blocker, with clickable `[pause]`, `[resume]`, and `[clear]` actions. The dialog host does not route plugin keymap layers, so keyboard users should close it and use `/gl pause`, `/gl resume`, or `/gl clear` from the prompt.
 
 The floating dialog is independent of the sidebar, so it still works when the sidebar auto-hides on a narrow terminal. Slash completion may require Enter once to complete `/gl-view` and a second Enter to submit it.
 

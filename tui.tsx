@@ -99,36 +99,9 @@ function GoalDialog(props: { context: Plugin.Context; sessionID: string }) {
     }
   }
 
-  context.keymap.layer(() => ({
-    mode: "modal",
-    commands: [
-      {
-        bind: "p",
-        title: "Pause goal",
-        group: "Goal",
-        enabled: goal()?.phase === "active",
-        run: () => void run("pause"),
-      },
-      {
-        bind: "r",
-        title: "Resume goal",
-        group: "Goal",
-        enabled:
-          goal()?.phase === "paused" ||
-          goal()?.phase === "blocked" ||
-          (goal()?.phase === "active" && goal()?.activation === "disarmed"),
-        run: () => void run("resume"),
-      },
-      {
-        bind: "x",
-        title: "Clear goal",
-        group: "Goal",
-        enabled: goal() !== undefined,
-        run: () => void run("clear"),
-      },
-    ],
-  }))
-
+  // The dialog host does not route plugin keymap layers to the focused
+  // dialog, so the actions are mouse-driven. `/gl pause|resume|clear` remains
+  // the keyboard path from the prompt.
   return (
     <Show when={goal()} fallback={<text fg={theme.text.muted}>No goal is set. Use /gl &lt;objective&gt;.</text>}>
       {(current) => (
@@ -156,7 +129,7 @@ function GoalDialog(props: { context: Plugin.Context; sessionID: string }) {
           </box>
           <box flexDirection="row" gap={2}>
             <Show when={current().phase === "active"}>
-              <text onMouseUp={() => void run("pause")}>[p] pause</text>
+              <text onMouseUp={() => void run("pause")}>[pause]</text>
             </Show>
             <Show
               when={
@@ -165,10 +138,13 @@ function GoalDialog(props: { context: Plugin.Context; sessionID: string }) {
                 (current().phase === "active" && current().activation === "disarmed")
               }
             >
-              <text onMouseUp={() => void run("resume")}>[r] resume</text>
+              <text onMouseUp={() => void run("resume")}>[resume]</text>
             </Show>
-            <text onMouseUp={() => void run("clear")}>[x] clear</text>
+            <text onMouseUp={() => void run("clear")}>[clear]</text>
           </box>
+          <text fg={theme.text.muted} wrapMode="word">
+            Click an action; Esc closes. Use /gl pause|resume|clear from the prompt.
+          </text>
           <text fg={theme.text.muted} wrapMode="word">
             /gl edit &lt;objective&gt; changes the objective
           </text>
