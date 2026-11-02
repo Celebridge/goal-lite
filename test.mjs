@@ -783,20 +783,28 @@ test("rpc get/pause/resume/clear drives the TUI sidebar", async () => {
   assert.equal(got.ok, true)
   assert.equal(got.value.objective, "one")
   assert.equal(got.value.activation, "armed")
-  assert.ok(
-    env.rpcEvents.some((event) => event.name === "changed" && event.data.goal?.objective === "one"),
+  const createdEvent = env.rpcEvents.find(
+    (event) => event.name === "changed" && event.data.goal?.objective === "one",
   )
+  assert.equal(createdEvent.data.goal.activation, "armed")
 
   const paused = await env.rpc("pause", { sessionID: env.sessionID })
   assert.equal(paused.ok, true)
   assert.equal(paused.value.phase, "paused")
   assert.equal(paused.value.activation, "disarmed")
-  assert.ok(env.rpcEvents.some((event) => event.name === "changed" && event.data.goal?.phase === "paused"))
+  const pausedEvent = env.rpcEvents.find(
+    (event) => event.name === "changed" && event.data.goal?.phase === "paused",
+  )
+  assert.equal(pausedEvent.data.goal.activation, "disarmed")
 
   const resumed = await env.rpc("resume", { sessionID: env.sessionID })
   assert.equal(resumed.ok, true)
   assert.equal(resumed.value.phase, "active")
   assert.equal(env.synthetic.length, 1)
+  const resumedEvent = env.rpcEvents.findLast(
+    (event) => event.name === "changed" && event.data.goal?.phase === "active",
+  )
+  assert.equal(resumedEvent.data.goal.activation, "armed")
 
   const cleared = await env.rpc("clear", { sessionID: env.sessionID })
   assert.equal(cleared.ok, true)

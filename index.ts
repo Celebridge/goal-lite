@@ -325,8 +325,15 @@ async function createGoal(
     createdAt: now,
     updatedAt: now,
   }
-  await saveGoal(ctx, sessionID, goal)
+  // Publish the armed state with the first change event; the RPC sidebar reads
+  // `activation` from the same in-memory set.
   armed.add(sessionID)
+  try {
+    await saveGoal(ctx, sessionID, goal)
+  } catch (error) {
+    armed.delete(sessionID)
+    throw error
+  }
   activeRounds.delete(sessionID)
   return goal
 }
@@ -380,8 +387,13 @@ async function resumeGoal(ctx: any, sessionID: string, ref: GoalRef): Promise<Go
     )
   const goal: GoalState = { ...current, phase: "active", revision: current.revision + 1, updatedAt: Date.now() }
   delete goal.blockedReason
-  await saveGoal(ctx, sessionID, goal)
   armed.add(sessionID)
+  try {
+    await saveGoal(ctx, sessionID, goal)
+  } catch (error) {
+    armed.delete(sessionID)
+    throw error
+  }
   activeRounds.delete(sessionID)
   return goal
 }
