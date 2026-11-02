@@ -813,6 +813,29 @@ test("rpc get/pause/resume/clear drives the TUI sidebar", async () => {
   assert.ok(env.rpcEvents.some((event) => event.name === "changed" && event.data.goal === null))
 })
 
+test("a superseded execution keeps a command round deferred during the handoff", async () => {
+  const env = await fresh("ses_t41")
+  human(env)
+  await env.tool("create_goal", { objective: "one" })
+  env.emit({ type: "session.execution.started", data: { sessionID: env.sessionID } })
+  env.emit({ type: "session.execution.started", data: { sessionID: env.sessionID } })
+  env.emit({
+    type: "session.execution.interrupted",
+    data: { sessionID: env.sessionID, reason: "superseded" },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  const edited = await env.command("edit two")
+  assert.equal(edited.ok, true)
+  assert.equal(env.goal.objective, "two")
+  assert.equal(env.synthetic.length, 0)
+
+  env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.goal.roundsStarted, 1)
+})
+
 // --- run --------------------------------------------------------------------
 
 let failed = 0

@@ -1078,6 +1078,13 @@ const GoalLitePlugin = {
               })
               continue
             }
+            if (event.type === "session.execution.interrupted" && event.data?.reason === "superseded") {
+              // A successor execution takes over from the interrupted one. Keep
+              // busy, the admitted round, and any deferred start: clearing them
+              // here opens a window where a command can inject a round into the
+              // successor. The successor's started/succeeded events own cleanup.
+              continue
+            }
             if (event.type === "session.deleted") {
               busy.delete(sessionID)
               pendingStart.delete(sessionID)
