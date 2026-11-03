@@ -418,6 +418,8 @@ test("round exhaustion blocks with round-limit", async () => {
   const created = await env.tool("create_goal", { objective: "one", max_goal_rounds: 1 })
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
   assert.equal(env.goal.roundsStarted, 1)
+  env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 10))
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
   assert.equal(env.synthetic.length, 1)
   assert.equal(env.goal.phase, "blocked")
@@ -692,10 +694,12 @@ test("/gl defers its first round while the session is busy", async () => {
   assert.equal(created.ok, true)
   assert.equal(env.goal.phase, "active")
   assert.equal(env.synthetic.length, 0)
+  // The idle hook also defers while the execution is still busy.
   await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
-  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.synthetic.length, 0)
   env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
-  await new Promise((resolve) => setTimeout(resolve, 10))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(env.synthetic.length, 1)
 })
 
 test("/gl starts a deferred round when the turn settles", async () => {
@@ -945,6 +949,98 @@ test("the goal mutation lock reclaims a dead owner", async () => {
   } finally {
     await rm(path, { force: true })
   }
+})
+
+test("a late user interrupt does not undo a resume that deferred its round", async () => {
+  const env = await fresh("ses_t46")
+  human(env)
+  const created = await env.tool("create_goal", { objective: "one" })
+  assert.equal(created.ok, true)
+
+  // An execution is running when the user pauses and immediately resumes.
+  env.emit({ type: "session.execution.started", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  const paused = await env.rpc("pause", { sessionID: env.sessionID })
+  assert.equal(paused.ok, true)
+  assert.equal(paused.value.phase, "paused")
+
+  const resumed = await env.rpc("resume", { sessionID: env.sessionID })
+  assert.equal(resumed.ok, true)
+  assert.equal(resumed.value.phase, "active")
+
+  // The interrupted event settles after resume; it must not pause the resumed
+  // goal or discard the deferred round.
+  env.emit({
+    type: "session.execution.interrupted",
+    data: { sessionID: env.sessionID, reason: "user" },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(env.goal.phase, "active")
+  assert.equal(env.goal.roundsStarted, 0)
+
+  await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
+  assert.equal(env.goal.phase, "active")
+  assert.equal(env.goal.roundsStarted, 1)
+  assert.equal(env.synthetic.length, 1)
+})
+
+test("pausing cancels a deferred round, so a later resume does not double-start", async () => {
+  const env = await fresh("ses_t48")
+  human(env)
+  await env.tool("create_goal", { objective: "one" })
+  env.emit({ type: "session.execution.started", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  // Edit defers a round because the execution is busy.
+  const edited = await env.command("edit two")
+  assert.equal(edited.ok, true)
+  assert.equal(env.synthetic.length, 0)
+
+  // Pause must cancel that deferred round.
+  const paused = await env.command("pause")
+  assert.equal(paused.ok, false)
+  assert.match(paused.error, /Goal paused/)
+  assert.equal(env.goal.phase, "paused")
+
+  env.emit({
+    type: "session.execution.interrupted",
+    data: { sessionID: env.sessionID, reason: "user" },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  const resumed = await env.command("resume")
+  assert.equal(resumed.ok, true)
+  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.goal.roundsStarted, 1)
+
+  env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.goal.roundsStarted, 1)
+})
+
+test("an idle round marks the session busy before a command can inject a second round", async () => {
+  const env = await fresh("ses_t47")
+  human(env)
+  await env.tool("create_goal", { objective: "one" })
+
+  await env.hooks["experimental.idle"]({ sessionID: env.sessionID, background: [] })
+  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.goal.roundsStarted, 1)
+
+  // The execution has not reported `started` yet; the command must defer.
+  const edited = await env.command("edit two")
+  assert.equal(edited.ok, true)
+  assert.equal(env.goal.objective, "two")
+  assert.equal(env.synthetic.length, 1)
+  assert.equal(env.goal.roundsStarted, 1)
+
+  env.emit({ type: "session.execution.succeeded", data: { sessionID: env.sessionID } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(env.synthetic.length, 2)
+  assert.equal(env.goal.roundsStarted, 2)
+  assert.match(env.synthetic[1].text, /Objective: "two"/)
 })
 
 // --- run --------------------------------------------------------------------
