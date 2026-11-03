@@ -502,11 +502,24 @@ async function turnAuthority(ctx: any, context: any): Promise<Authority> {
     goal.phase === "active" &&
     (inMemoryRound || (roundIndex !== -1 && roundRevision === goal.revision))
 
+  // When compaction removed the round message, `inMemoryRound` still proves
+  // this is a goal round. A human steer admitted after the round must still
+  // count as direct-human authority; compare message times against the round's
+  // admission time so the original user message is not mistaken for a steer.
+  const humanAfterAdmitted =
+    active !== undefined &&
+    turn.some(
+      (message) =>
+        message?.type === "user" &&
+        typeof message?.time?.created === "number" &&
+        message.time.created > active.admittedAt,
+    )
+
   const directHuman =
     roundIndex !== -1
       ? turn.slice(roundIndex + 1).some((message) => message?.type === "user")
       : inMemoryRound
-        ? false
+        ? humanAfterAdmitted
         : turn.some((message) => message?.type === "user")
 
   return { directHuman, goalRound, goal }

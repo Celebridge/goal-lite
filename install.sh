@@ -4,4 +4,4 @@ dest="$HOME/.config/opencode/plugins/goal-lite"
 mkdir -p "$dest"
 cp "$(cd "$(dirname "$0")" && pwd)/index.ts" "$dest/index.ts"
 echo "Installed goal-lite to $dest"
-echo 'Ensure ~/.config/opencode/opencode.json has: plugins: ["@openviking/opencode-plugin", "-opencode.goal"] and experimental.todo: true'
+echo 'Ensure ~/.config/opencode/opencode.json has plugins: ["-opencode.goal"] (add "@openviking/opencode-plugin" only if installed) and experimental.todo: true'
