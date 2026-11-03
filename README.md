@@ -25,7 +25,7 @@ Semantics mirror `@deepseek-ai/dsh-goal` + `dsh-tool-goal` + `dsh-goal-round-dri
 .\install.ps1
 ```
 
-Target: `%USERPROFILE%\.config\opencode\plugins\goal-lite\index.ts`
+Target: `%USERPROFILE%\.config\opencode\plugins\goal-lite\` (`index.ts`, `rpc.ts`, `tui.tsx`)
 
 ### macOS / Linux
 
@@ -33,7 +33,7 @@ Target: `%USERPROFILE%\.config\opencode\plugins\goal-lite\index.ts`
 bash install.sh
 ```
 
-Target: `~/.config/opencode/plugins/goal-lite/index.ts`
+Target: `~/.config/opencode/plugins/goal-lite/` (`index.ts`, `rpc.ts`, `tui.tsx`)
 
 ### Config
 
@@ -53,7 +53,7 @@ In `~/.config/opencode/opencode.json`:
 - `@openviking/opencode-plugin` is only needed when that plugin is installed. If OpenViking is configured as an MCP server instead (the current macOS setup), use `"plugins": ["-opencode.goal"]`.
 - `experimental.todo` enables the built-in `todowrite`.
 - The local plugin directory loads automatically; it does not need an entry in `plugins`.
-- No `package.json` and no npm dependencies: the plugin exports a plain `{ id, setup }` object.
+- No `package.json` and no npm dependencies: the server part exports a plain `{ id, setup }` object; `rpc.ts` and `tui.tsx` provide the sidebar and floating dialog.
 
 Restart OpenCode completely after changing the config.
 
@@ -69,6 +69,22 @@ Restart OpenCode completely after changing the config.
 | `/gl clear` | delete the goal |
 
 `/gl` output is delivered as a command error because OpenCode v2 commands have no success-output channel. The text is visible in the UI and does not enter model history.
+
+## TUI sidebar and floating dialog
+
+The TUI part adds a compact goal block at the top of the right sidebar (`sidebar.content`):
+
+- phase, `rounds/max` continuation budget, and a progress bar (this is not a completion percentage);
+- the objective;
+- an `armed`/`disarmed` warning after a server restart;
+- the blocker message when the goal is blocked;
+- for a complete goal, `✓ Completed in N rounds` instead of the budget bar.
+
+Click the block, run `/gl-view` (alias `/gls`), or press `Ctrl+Shift+G` to open a floating goal dialog. The dialog shows the full objective, phase, rounds, activation, and blocker, with clickable `[pause]`, `[resume]`, and `[clear]` actions. The dialog host does not route plugin keymap layers, so keyboard users should close it and use `/gl pause`, `/gl resume`, or `/gl clear` from the prompt.
+
+The floating dialog is independent of the sidebar, so it still works when the sidebar auto-hides on a narrow terminal. Slash completion may require Enter once to complete `/gl-view` and a second Enter to submit it.
+
+The TUI shares goal state through a `goal-lite` RPC (`get` / `pause` / `resume` / `clear` plus a `changed` event). Every durable goal write publishes `changed`, so the sidebar and dialog update live.
 
 ## Tools
 

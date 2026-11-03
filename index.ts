@@ -12,6 +12,8 @@
 //   activation: process-local continuation permission, disarmed on load
 //   no acceptance_criteria and no independent completion reviewer
 
+import { GoalLite, type GoalPublic } from "./rpc.ts"
+
 const SOURCE = "goal-lite"
 const STORAGE_PREFIX = "session:"
 const DEFAULT_MAX_GOAL_ROUNDS = 50
@@ -70,6 +72,9 @@ const activeRounds = new Map<string, ActiveRound>()
 
 /** Avoid logging the same corrupt state on every context request. */
 const warnedCorrupt = new Set<string>()
+
+/** Set while the RPC registration is live, so durable writes notify the TUI sidebar. */
+let notifyGoalChanged: ((sessionID: string, goal: GoalState | undefined) => void) | undefined
 
 /** Commands issued during a running turn defer their first round to the next idle boundary. */
 const pendingStart = new Set<string>()
@@ -144,6 +149,20 @@ function goalValue(goal: GoalState | undefined, sessionID: string) {
 }
 
 /** Render direct command output without exposing compare-and-set internals. */
+/** Shape shared with the TUI sidebar and dialog. */
+function publicGoal(goal: GoalState, sessionID: string): GoalPublic {
+  return {
+    id: goal.id,
+    revision: goal.revision,
+    objective: goal.objective,
+    phase: goal.phase,
+    roundsStarted: goal.roundsStarted,
+    maxGoalRounds: goal.maxGoalRounds,
+    ...(goal.blockedReason === undefined ? {} : { blockedReason: goal.blockedReason }),
+    activation: isArmed(goal, sessionID) ? "armed" : "disarmed",
+  }
+}
+
 function renderGoal(title: string, goal: GoalState, sessionID: string): string {
   const reason = goal.phase === "blocked" ? goal.blockedReason : undefined
   const blocker = reason === undefined ? [] : [`Blocker: ${reason.code}: ${reason.message}`]
@@ -222,12 +241,14 @@ async function readGoal(ctx: any, sessionID: string): Promise<GoalState | undefi
 
 async function saveGoal(ctx: any, sessionID: string, goal: GoalState): Promise<void> {
   await ctx.storage.set(STORAGE_PREFIX + sessionID, goal)
+  notifyGoalChanged?.(sessionID, goal)
 }
 
 async function removeGoal(ctx: any, sessionID: string): Promise<void> {
   await ctx.storage.remove(STORAGE_PREFIX + sessionID)
   armed.delete(sessionID)
   activeRounds.delete(sessionID)
+  notifyGoalChanged?.(sessionID, undefined)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,8 +325,15 @@ async function createGoal(
     createdAt: now,
     updatedAt: now,
   }
-  await saveGoal(ctx, sessionID, goal)
+  // Publish the armed state with the first change event; the RPC sidebar reads
+  // `activation` from the same in-memory set.
   armed.add(sessionID)
+  try {
+    await saveGoal(ctx, sessionID, goal)
+  } catch (error) {
+    armed.delete(sessionID)
+    throw error
+  }
   activeRounds.delete(sessionID)
   return goal
 }
@@ -359,8 +387,13 @@ async function resumeGoal(ctx: any, sessionID: string, ref: GoalRef): Promise<Go
     )
   const goal: GoalState = { ...current, phase: "active", revision: current.revision + 1, updatedAt: Date.now() }
   delete goal.blockedReason
-  await saveGoal(ctx, sessionID, goal)
   armed.add(sessionID)
+  try {
+    await saveGoal(ctx, sessionID, goal)
+  } catch (error) {
+    armed.delete(sessionID)
+    throw error
+  }
   activeRounds.delete(sessionID)
   return goal
 }
@@ -766,6 +799,48 @@ const GoalLitePlugin = {
   id: "goal-lite",
 
   async setup(ctx: any) {
+    const rpc = await ctx.rpc.register(GoalLite, {
+      get: async (input: any) => {
+        const goal = await readGoal(ctx, input.sessionID)
+        return goal === undefined ? null : publicGoal(goal, input.sessionID)
+      },
+      pause: async (input: any) =>
+        serialize(input.sessionID, async () => {
+          const current = await readGoal(ctx, input.sessionID)
+          if (current === undefined) return null
+          const paused = await pauseGoal(ctx, input.sessionID, goalRef(current.id, current.revision))
+          try {
+            await ctx.session.interrupt({ sessionID: input.sessionID, resume: false })
+          } catch {}
+          return publicGoal(paused, input.sessionID)
+        }),
+      resume: async (input: any) =>
+        serialize(input.sessionID, async () => {
+          const current = await readGoal(ctx, input.sessionID)
+          if (current === undefined) return null
+          const resumed = await resumeGoal(ctx, input.sessionID, goalRef(current.id, current.revision))
+          await startFromCommand(ctx, input.sessionID, resumed, "steer")
+          return publicGoal(resumed, input.sessionID)
+        }),
+      clear: async (input: any) =>
+        serialize(input.sessionID, async () => {
+          const current = await readGoal(ctx, input.sessionID)
+          if (current === undefined) {
+            const raw = await ctx.storage.get(STORAGE_PREFIX + input.sessionID)
+            if (raw !== undefined) await removeGoal(ctx, input.sessionID)
+            return null
+          }
+          await clearGoal(ctx, input.sessionID, goalRef(current.id, current.revision))
+          return null
+        }),
+    })
+
+    notifyGoalChanged = (sessionID, goal) => {
+      void rpc.events
+        .emit("changed", { sessionID, goal: goal === undefined ? null : publicGoal(goal, sessionID) })
+        .catch((error: unknown) => console.error("[goal-lite] failed to publish goal change", error))
+    }
+
     // Replay the model-facing policy only while a goal exists. The text is
     // stable, so it appends as one cached system part.
     await ctx.session.hook("context", async (event: any) => {
@@ -1016,6 +1091,8 @@ const GoalLitePlugin = {
               activeRounds.delete(sessionID)
               pendingStart.delete(sessionID)
               armed.delete(sessionID)
+              const goal = await readGoal(ctx, sessionID)
+              if (goal !== undefined) notifyGoalChanged?.(sessionID, goal)
               continue
             }
             busy.delete(sessionID)
@@ -1044,6 +1121,7 @@ const GoalLitePlugin = {
       controller.abort()
       // DSH disarms a driver before unloading it; a later human request must
       // rearm the goal explicitly.
+      notifyGoalChanged = undefined
       armed.clear()
       busy.clear()
       pendingStart.clear()
