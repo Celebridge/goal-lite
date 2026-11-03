@@ -102,7 +102,10 @@ Authority:
 ## State
 
 Stored through OpenCode's plugin storage (`ctx.storage`), key `session:<sessionID>`.
-No paths, locks, or files to manage; Windows and macOS both work without platform config.
+
+Every durable mutation is serialized per session. Inside one process the plugin uses an async queue; across server processes on the same host it also takes a per-session lock file under the OS temp directory (`opencode-goal-lite-locks`). A second process waits up to 15 seconds, then fails the operation instead of overwriting state. A lock left by a dead process is reclaimed. A lock from another host is reclaimed after five minutes, so a shared database must not be mutated by live processes on different hosts.
+
+`activation`, `busy`, deferred starts, and idle driving remain process-local. The lock prevents lost goal updates, but it does not coordinate two processes that independently drive the same armed session; run one server process per session.
 
 A new process starts with every goal disarmed. An active goal keeps its phase but does not continue until a human asks and the model calls `update_goal(action="resume")`, or a human runs `/gl resume`.
 
@@ -112,11 +115,12 @@ A new process starts with every goal disarmed. An active goal keeps its phase bu
 node test.mjs
 ```
 
-38 semantic tests, no model or server required.
+45 semantic tests, no model or server required.
 
 Known deviations from DSH:
 
 - storage is plugin JSON instead of an event-sourced session log;
+- durable goal writes are cross-process safe on one host, but activation and idle driving stay process-local, so one server process should own a session;
 - `/gl` output is a command error (UI only);
 - `/gl create|edit|resume` sends the next round itself, because OpenCode commands do not trigger idle;
 - default `maxGoalRounds` is 50 (DSH uses 256);

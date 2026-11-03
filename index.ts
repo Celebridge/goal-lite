@@ -12,6 +12,9 @@
 //   activation: process-local continuation permission, disarmed on load
 //   no acceptance_criteria and no independent completion reviewer
 
+import { mkdir, open, readFile, rm, stat, type FileHandle } from "node:fs/promises"
+import { hostname, tmpdir } from "node:os"
+import { join } from "node:path"
 import { GoalLite, type GoalPublic } from "./rpc.ts"
 
 const SOURCE = "goal-lite"
@@ -19,6 +22,9 @@ const STORAGE_PREFIX = "session:"
 const DEFAULT_MAX_GOAL_ROUNDS = 50
 const BLOCKED_AFTER_CONSECUTIVE_ROUNDS = 3
 const MAX_OBJECTIVE = 4_000
+const LOCK_DIRECTORY = join(tmpdir(), "opencode-goal-lite-locks")
+const LOCK_TIMEOUT_MS = 15_000
+const LOCK_STALE_MS = 5 * 60_000
 
 const USAGE = "Usage: /gl [<objective>|clear|edit <objective>|pause|resume]"
 
@@ -79,9 +85,135 @@ let notifyGoalChanged: ((sessionID: string, goal: GoalState | undefined) => void
 /** Commands issued during a running turn defer their first round to the next idle boundary. */
 const pendingStart = new Set<string>()
 
+interface GoalLockOwner {
+  token: string
+  pid: number
+  host: string
+  createdAt: number
+}
+
+/**
+ * The in-process queue cannot protect a database shared by two server
+ * processes. Every mutation therefore also takes a per-session lock file:
+ * creating it is atomic, and a crashed owner is detected by PID (same host) or
+ * by age (a lock from another host cannot be checked locally).
+ *
+ * `goalLockPath` and `acquireGoalLock` are exported for test.mjs, which
+ * exercises the lock without starting a second OpenCode server.
+ */
+export function goalLockPath(sessionID: string): string {
+  return join(LOCK_DIRECTORY, `${Buffer.from(sessionID).toString("base64url")}.lock`)
+}
+
+async function readGoalLockOwner(path: string): Promise<GoalLockOwner | undefined> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Partial<GoalLockOwner>
+    if (
+      typeof value?.token !== "string" ||
+      typeof value?.pid !== "number" ||
+      typeof value?.host !== "string" ||
+      typeof value?.createdAt !== "number"
+    )
+      return undefined
+    return value as GoalLockOwner
+  } catch {
+    return undefined
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error: any) {
+    // EPERM still means the process exists but belongs to another user.
+    return error?.code === "EPERM"
+  }
+}
+
+async function goalLockIsStale(path: string): Promise<boolean> {
+  let file
+  try {
+    file = await stat(path)
+  } catch {
+    return false
+  }
+  const owner = await readGoalLockOwner(path)
+  if (owner === undefined) {
+    // The creator may still be writing the owner record. Only reclaim a
+    // malformed file after it has clearly been abandoned.
+    return Date.now() - file.mtimeMs > 5_000
+  }
+  if (owner.host === hostname()) return !processIsAlive(owner.pid)
+  return Date.now() - file.mtimeMs > LOCK_STALE_MS
+}
+
+function goalLockTimeout(): Error {
+  return new Error(
+    "GOAL_LOCK_TIMEOUT: another OpenCode process is updating this goal; retry the operation",
+  )
+}
+
+/** Acquire the cross-process mutation lock for one session. */
+export async function acquireGoalLock(
+  sessionID: string,
+  timeoutMs = LOCK_TIMEOUT_MS,
+): Promise<() => Promise<void>> {
+  const path = goalLockPath(sessionID)
+  const token = `${process.pid}:${crypto.randomUUID()}`
+  const startedAt = Date.now()
+  for (;;) {
+    let handle: FileHandle | undefined
+    let created = false
+    try {
+      await mkdir(LOCK_DIRECTORY, { recursive: true })
+      handle = await open(path, "wx")
+      created = true
+      await handle.writeFile(
+        JSON.stringify({ token, pid: process.pid, host: hostname(), createdAt: Date.now() }),
+      )
+      await handle.close()
+      handle = undefined
+      return async () => {
+        try {
+          const owner = await readGoalLockOwner(path)
+          if (owner?.token === token) await rm(path, { force: true })
+        } catch {}
+      }
+    } catch (error: any) {
+      try {
+        await handle?.close()
+      } catch {}
+      if (created) {
+        try {
+          await rm(path, { force: true })
+        } catch {}
+      }
+      if (error?.code !== "EEXIST") throw error
+      if (await goalLockIsStale(path)) {
+        try {
+          await rm(path, { force: true })
+        } catch {}
+        if (Date.now() - startedAt >= timeoutMs) throw goalLockTimeout()
+        continue
+      }
+      if (Date.now() - startedAt >= timeoutMs) throw goalLockTimeout()
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.floor(Math.random() * 30)))
+    }
+  }
+}
+
 function serialize<T>(sessionID: string, task: () => Promise<T>): Promise<T> {
   const previous = queues.get(sessionID) ?? Promise.resolve()
-  const next = previous.catch(() => {}).then(task)
+  const next = previous.catch(() => {}).then(async () => {
+    const release = await acquireGoalLock(sessionID)
+    try {
+      return await task()
+    } finally {
+      await release()
+    }
+  })
   const tail = next.catch(() => {})
   queues.set(sessionID, tail)
   void tail.then(() => {
@@ -644,6 +776,29 @@ async function startRound(
   return { started: true, goal: reserved }
 }
 
+/** Tool calls that can outlive the execution which started them. */
+const BACKGROUND_TOOL_NAMES: ReadonlySet<string> = new Set(["image", "shell", "subagent"])
+
+function isRunningBackgroundMessage(message: any): boolean {
+  if (message?.type === "shell") return message.status === "running"
+  if (message?.type !== "assistant" || !Array.isArray(message.content)) return false
+  return message.content.some(
+    (part: any) =>
+      part?.type === "tool" &&
+      part?.state?.status === "running" &&
+      BACKGROUND_TOOL_NAMES.has(part.name),
+  )
+}
+
+/**
+ * The executed turn has settled, but the session context can still show a
+ * background shell or subagent/image call that the idle hook must wait for.
+ */
+async function hasRunningBackground(ctx: any, sessionID: string): Promise<boolean> {
+  const messages = await ctx.session.context({ sessionID })
+  return messages.some(isRunningBackgroundMessage)
+}
+
 /** DSH driver: only an active, armed goal that is not waiting on background work. */
 async function drive(ctx: any, sessionID: string, background: readonly any[]): Promise<boolean> {
   const goal = await readGoal(ctx, sessionID)
@@ -1059,14 +1214,27 @@ const GoalLitePlugin = {
             if (event.type === "session.execution.succeeded") {
               busy.delete(sessionID)
               activeRounds.delete(sessionID)
-              if (!pendingStart.delete(sessionID)) continue
+              if (!pendingStart.has(sessionID)) continue
               // A command created/resumed/edited the goal after the idle hook
-              // already returned: start the deferred round now.
+              // already returned: start the deferred round now, unless the
+              // context still shows background work that the idle hook defers.
               await serialize(sessionID, async () => {
                 const session = await ctx.session.get({ sessionID })
-                if (session?.parentID !== undefined) return
                 const goal = await readGoal(ctx, sessionID)
-                if (goal === undefined || goal.phase !== "active" || !armed.has(sessionID)) return
+                if (
+                  session?.parentID !== undefined ||
+                  goal === undefined ||
+                  goal.phase !== "active" ||
+                  !armed.has(sessionID)
+                ) {
+                  pendingStart.delete(sessionID)
+                  return
+                }
+                if (await hasRunningBackground(ctx, sessionID)) return
+                // A successor execution may have started while this handler
+                // waited for the mutation queue; its settle event retries.
+                if (busy.has(sessionID)) return
+                pendingStart.delete(sessionID)
                 busy.add(sessionID)
                 try {
                   const result = await startRound(ctx, sessionID, goal)
@@ -1076,6 +1244,13 @@ const GoalLitePlugin = {
                   throw error
                 }
               })
+              continue
+            }
+            if (event.type === "session.execution.interrupted" && event.data?.reason === "superseded") {
+              // A successor execution takes over from the interrupted one. Keep
+              // busy, the admitted round, and any deferred start: clearing them
+              // here opens a window where a command can inject a round into the
+              // successor. The successor's started/succeeded events own cleanup.
               continue
             }
             if (event.type === "session.deleted") {
