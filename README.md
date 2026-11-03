@@ -115,7 +115,7 @@ A new process starts with every goal disarmed. An active goal keeps its phase bu
 node test.mjs
 ```
 
-45 semantic tests, no model or server required.
+48 semantic tests, no model or server required.
 
 Known deviations from DSH:
 

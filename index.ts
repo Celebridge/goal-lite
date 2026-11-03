@@ -377,6 +377,7 @@ async function saveGoal(ctx: any, sessionID: string, goal: GoalState): Promise<v
 }
 
 async function removeGoal(ctx: any, sessionID: string): Promise<void> {
+  pendingStart.delete(sessionID)
   await ctx.storage.remove(STORAGE_PREFIX + sessionID)
   armed.delete(sessionID)
   activeRounds.delete(sessionID)
@@ -445,6 +446,7 @@ async function createGoal(
   const current = await readGoal(ctx, sessionID)
   if (current !== undefined && current.phase !== "complete")
     fail(`goal "${current.id}" already exists with phase "${current.phase}"`, "GOAL_ALREADY_EXISTS")
+  pendingStart.delete(sessionID)
   const now = Date.now()
   const goal: GoalState = {
     id: `goal-${crypto.randomUUID()}`,
@@ -483,6 +485,7 @@ async function editGoal(
   if (hasRoundCap(maxGoalRounds)) changes.maxGoalRounds = resolveMaxGoalRounds(maxGoalRounds)
   if (changes.objective === undefined && changes.maxGoalRounds === undefined)
     fail("goal edit requires objective and/or maxGoalRounds", "GOAL_INVALID_EDIT")
+  pendingStart.delete(sessionID)
   const goal: GoalState = {
     ...current,
     ...changes,
@@ -498,6 +501,7 @@ async function pauseGoal(ctx: any, sessionID: string, ref: GoalRef): Promise<Goa
   const current = expectCurrent(await readGoal(ctx, sessionID), ref)
   if (current.phase !== "active")
     fail(`goal "${current.id}" is ${current.phase}; pause requires active`, "GOAL_INVALID_TRANSITION")
+  pendingStart.delete(sessionID)
   const goal: GoalState = { ...current, phase: "paused", revision: current.revision + 1, updatedAt: Date.now() }
   delete goal.blockedReason
   await saveGoal(ctx, sessionID, goal)
@@ -517,6 +521,7 @@ async function resumeGoal(ctx: any, sessionID: string, ref: GoalRef): Promise<Go
       `goal "${current.id}" exhausted ${current.maxGoalRounds} goal rounds; increase maxGoalRounds before resuming`,
       "GOAL_INVALID_TRANSITION",
     )
+  pendingStart.delete(sessionID)
   const goal: GoalState = { ...current, phase: "active", revision: current.revision + 1, updatedAt: Date.now() }
   delete goal.blockedReason
   armed.add(sessionID)
@@ -534,6 +539,7 @@ async function completeGoal(ctx: any, sessionID: string, ref: GoalRef): Promise<
   const current = expectCurrent(await readGoal(ctx, sessionID), ref)
   if (current.phase === "complete")
     fail(`goal "${current.id}" is already complete`, "GOAL_INVALID_TRANSITION")
+  pendingStart.delete(sessionID)
   const goal: GoalState = { ...current, phase: "complete", revision: current.revision + 1, updatedAt: Date.now() }
   delete goal.blockedReason
   await saveGoal(ctx, sessionID, goal)
@@ -569,6 +575,7 @@ async function blockGoal(
   const current = expectCurrent(await readGoal(ctx, sessionID), ref)
   if (current.phase !== "active")
     fail(`goal "${current.id}" is ${current.phase}; block requires active`, "GOAL_INVALID_TRANSITION")
+  pendingStart.delete(sessionID)
   const goal: GoalState = {
     ...current,
     phase: "blocked",
@@ -805,14 +812,24 @@ async function drive(ctx: any, sessionID: string, background: readonly any[]): P
   if (goal === undefined || goal.phase !== "active" || !armed.has(sessionID)) return false
   const session = await ctx.session.get({ sessionID })
   if (session?.parentID !== undefined) return false
+  if (busy.has(sessionID)) return false
   const waiting = background.some(
     (work) =>
       work?.sessionID === sessionID &&
       (work.kind === "subagent" || work.kind === "image" || work.kind === "shell"),
   )
   if (waiting) return false
-  const result = await startRound(ctx, sessionID, goal)
-  return result.started
+  // Close the window before `execution.started` arrives: a command must defer
+  // to the round this hook is about to wake instead of injecting a second one.
+  busy.add(sessionID)
+  try {
+    const result = await startRound(ctx, sessionID, goal)
+    if (!result.started) busy.delete(sessionID)
+    return result.started
+  } catch (error) {
+    busy.delete(sessionID)
+    throw error
+  }
 }
 
 function truncate(text: string, length: number): string {
@@ -861,6 +878,8 @@ async function startFromCommand(
     pendingStart.add(sessionID)
     return
   }
+  // A direct start supersedes any older deferred start.
+  pendingStart.delete(sessionID)
   // Close the window before `execution.started` arrives: a second command must
   // not inject another round into the execution this one just woke.
   busy.add(sessionID)
@@ -1272,8 +1291,15 @@ const GoalLitePlugin = {
             }
             busy.delete(sessionID)
             activeRounds.delete(sessionID)
-            pendingStart.delete(sessionID)
-            if (event.data?.reason !== "user") continue
+            if (event.data?.reason !== "user") {
+              pendingStart.delete(sessionID)
+              continue
+            }
+            // A command can create, resume, or edit the goal after the
+            // interruption was accepted but before this event arrives. Its
+            // deferred round is newer than the interrupt, so do not pause the
+            // goal or drop the pending start.
+            if (pendingStart.has(sessionID)) continue
             await serialize(sessionID, async () => {
               const goal = await readGoal(ctx, sessionID)
               if (goal === undefined || goal.phase !== "active") return
